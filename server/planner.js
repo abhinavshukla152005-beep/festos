@@ -7,9 +7,9 @@
 const LAKH = 100000;
 
 const FEE_BANDS = {
-  artist: { base: 1.4, max: 24 },
-  movie: { base: 0.35, max: 1.4 },
-  place: { base: 0.22, max: 0.95 },
+  artist: { base: 0.6, max: 13 },
+  movie: { base: 0.25, max: 1.1 },
+  place: { base: 0.15, max: 0.8 },
 };
 
 function hash(str) {
@@ -39,7 +39,7 @@ export function feeFor(entity, kind) {
 }
 
 function primaryTag(entity) {
-  return (entity.tags && entity.tags[0]) || 'uncharted';
+  return entity.cuisine || (entity.tags && entity.tags[0]) || 'uncharted';
 }
 
 function combos(items, k) {

@@ -31,6 +31,41 @@ function nameScore(a, b) {
   return hits ? 0.45 + (hits / Math.max(tokens.length, 1)) * 0.3 : 0;
 }
 
+const CUISINE_RULES = [
+  ['Biryani', /biryani|hyderabadi/i],
+  ['South Indian', /south indian|dosa|idli|uttapam/i],
+  ['Mughlai', /mughlai|kebab|tandoori|nihari/i],
+  ['Indian', /indian|thali|paneer|curry/i],
+  ['Chinese', /chinese|noodle|manchurian|dim sum/i],
+  ['Italian', /italian|pizza|pasta/i],
+  ['Continental', /continental/i],
+  ['Bakery', /bakery|patisserie|cake shop/i],
+  ['Desserts', /dessert|ice cream|sweets|mithai/i],
+  ['Café', /cafe|coffee|espresso|chai/i],
+  ['Burgers', /burger/i],
+  ['Chaat', /chaat|street food/i],
+  ['Grill', /grill|barbecue|bbq/i],
+  ['Oriental', /thai|sushi|asian|oriental/i],
+  ['Mexican', /mexican|taco/i],
+  ['Bar food', /pub\b|brewery|lounge/i],
+];
+const FOOD_WORDS = /restaurant|cafe|coffee|food|kitchen|dine|eatery|dhaba|canteen|bakery|bar\b|pub\b|lounge|sweets|dessert|biryani|pizza|burger|chaat/i;
+
+function classifyPlace(place) {
+  const hay = `${place.name || ''} ${place.blurb || ''} ${(place.tags || []).join(' ')}`;
+  const match = CUISINE_RULES.find(([, re]) => re.test(hay));
+  return { cuisine: match ? match[0] : null, food: FOOD_WORDS.test(hay) };
+}
+
+function foodPlaces(rows) {
+  const tagged = rows.map((row) => {
+    const { cuisine, food } = classifyPlace(row);
+    return { row: cuisine ? { ...row, cuisine } : row, food };
+  });
+  const edible = tagged.filter((t) => t.food);
+  return (edible.length ? edible : tagged).map((t) => t.row);
+}
+
 function mergeCandidate(map, entity, seedName, rank) {
   const id = entity.entity_id || `${entity.name}-${seedName}`;
   const affinity = typeof entity.affinity === 'number' ? entity.affinity : null;
@@ -158,7 +193,7 @@ export async function buildPlan(input = {}) {
       detail: `${resolvedSeeds.length}/${seeds.length} signals resolved${
         unresolved.length ? ` · unresolved: ${unresolved.join(', ')}` : ''
       }${diagnostics.resolveErrors.length ? ` · ${diagnostics.resolveErrors.length} search errors` : ''}`,
-      chips: resolvedSeeds.map((s) => `${s.name} → ${s.entity.name} (${s.kind})`),
+      chips: resolvedSeeds.map((s) => `${s.name} → ${s.entity.name} (${s.entity.kind})`),
     };
   });
 
@@ -196,6 +231,7 @@ export async function buildPlan(input = {}) {
           rows = await client.insights(type, seedEntity, { take, deadlineAt });
           fellBack = rows.length > 0;
         }
+        if (kind === 'place') rows = foodPlaces(rows);
         return { rows, kind, seedName: seedEntity.name, fellBack };
       } catch (err) {
         diagnostics.insightErrors.push(`${kind} from "${seedEntity.name}": ${err.message}`);
@@ -225,7 +261,8 @@ export async function buildPlan(input = {}) {
       chips: [
         `signals: ${resolved.resolvedSeeds.map((s) => s.entity.name).join(', ')}`,
         placeFallbackUsed ? `venues: broader affinity (no ${city} venues)` : `venues: ${city}`,
-        failed ? `error: ${diagnostics.insightErrors[0]}` : null,
+        failed ? `Qloo: ${failed}/${jobs.length} calls failed (retried)` : null,
+        noRows && diagnostics.insightErrors[0] ? `error: ${diagnostics.insightErrors[0]}` : null,
       ].filter(Boolean),
     };
   });
@@ -318,7 +355,7 @@ export async function buildPlan(input = {}) {
         query: s.name,
         resolved: s.entity.name,
         resolvedId: s.entity.entity_id,
-        kind: s.kind,
+        kind: s.entity.kind,
       })),
       unresolved: resolved.unresolved,
       cacheHits: client.stats.cacheHits || 0,

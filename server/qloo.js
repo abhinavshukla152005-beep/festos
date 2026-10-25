@@ -107,7 +107,7 @@ export function createClient({ forceDemo = false } = {}) {
       stats.cacheHits += 1;
       return { data: hit.data, ms: 0, url: cacheKey, cached: true };
     }
-    const attempts = 2;
+    const attempts = 3;
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
       const started = Date.now();
       stats.calls += 1;
