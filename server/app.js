@@ -5,6 +5,8 @@ import { fileURLToPath } from 'node:url';
 import { buildPlan } from './agent.js';
 import { diffPlans } from './planner.js';
 import { liveModeAvailable } from './qloo.js';
+import { paypalStatus } from './paypal.js';
+import { draftSettlement, createSettlementOrders, captureSettlementOrder } from './settlement.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -30,11 +32,24 @@ app.use((req, res, next) => {
 
 const api = express.Router();
 
+function publicOrigin(req) {
+  const configured = process.env.PUBLIC_BASE_URL?.trim();
+  if (configured) return configured.replace(/\/$/, '');
+  const proto = String(req.headers['x-forwarded-proto'] || req.protocol || 'http')
+    .split(',')[0]
+    .trim();
+  const host = String(req.headers['x-forwarded-host'] || req.headers.host || 'localhost:8787')
+    .split(',')[0]
+    .trim();
+  return `${proto}://${host}`;
+}
+
 api.get('/health', (req, res) => {
   res.json({
     ok: true,
     liveQloo: liveModeAvailable,
     mode: liveModeAvailable ? 'live' : 'demo',
+    paypal: paypalStatus(),
     time: new Date().toISOString(),
   });
 });
@@ -77,6 +92,39 @@ api.post('/replan', async (req, res) => {
   } catch (err) {
     console.error('[replan]', err);
     res.status(500).json({ error: 'Re-planning failed. Try again.' });
+  }
+});
+
+api.post('/settlement/draft', (req, res) => {
+  try {
+    res.json(draftSettlement(req.body || {}));
+  } catch (err) {
+    res.status(err.statusCode || 400).json({ error: err.message });
+  }
+});
+
+api.post('/settlement/orders', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const result = await createSettlementOrders({
+      obligations: body.obligations,
+      runId: body.runId,
+      origin: publicOrigin(req),
+    });
+    res.json(result);
+  } catch (err) {
+    console.error('[settlement:orders]', err.message);
+    res.status(err.statusCode || 502).json({ error: err.message });
+  }
+});
+
+api.post('/settlement/capture', async (req, res) => {
+  try {
+    const result = await captureSettlementOrder({ orderId: req.body?.orderId });
+    res.json(result);
+  } catch (err) {
+    console.error('[settlement:capture]', err.message);
+    res.status(err.statusCode || 502).json({ error: err.message });
   }
 });
 

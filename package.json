@@ -9,6 +9,7 @@
     "dev:server": "node --watch server/index.js",
     "dev:web": "vite",
     "build": "vite build",
+    "test": "node --test test/settlement.test.js",
     "deploy:function": "node scripts/build-function.mjs",
     "start": "node server/index.js"
   },

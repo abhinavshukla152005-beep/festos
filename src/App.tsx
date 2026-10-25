@@ -1,8 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
-import type { Pick, PlanResponse, TraceStep } from './types';
+import type {
+  Obligation,
+  PayPalStatus,
+  Pick,
+  Plan,
+  PlanResponse,
+  SettlementDraft,
+  SettlementOrder,
+  TraceStep,
+} from './types';
 
 const API_BASE = '/functions/v1/app';
+const STORE_KEY = 'festos.settlement.v1';
 
 const inr = (amount: number) => {
   if (!Number.isFinite(amount)) return '—';
@@ -10,6 +20,15 @@ const inr = (amount: number) => {
   if (amount >= 100000) return `₹${(amount / 100000).toFixed(1)} L`;
   return `₹${Math.round(amount).toLocaleString('en-IN')}`;
 };
+
+const usd = (amount: number) => {
+  if (!Number.isFinite(amount)) return '—';
+  return `$${amount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+};
+
+const signatureOf = (plan?: Plan) =>
+  plan ? plan.lineup.map((p) => `${p.slot}:${p.entity_id}:${p.feeInr}`).join('|') : '';
+
 
 const SAMPLE_BRIEFS = [
   { label: 'Indie + sci-fi', seeds: ['Prateek Kuhad', 'Anuv Jain', 'Interstellar'] },
@@ -97,8 +116,21 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [visibleSteps, setVisibleSteps] = useState(0);
   const [lastAction, setLastAction] = useState<string | null>(null);
+  const [paypal, setPaypal] = useState<PayPalStatus | null>(null);
+  const [depositPct, setDepositPct] = useState(30);
+  const [capPct, setCapPct] = useState(100);
+  const [settlement, setSettlement] = useState<SettlementDraft | null>(null);
+  const [settlementSignature, setSettlementSignature] = useState<string | null>(null);
+  const [orders, setOrders] = useState<Record<string, SettlementOrder>>({});
+  const [ledger, setLedger] = useState<SettlementOrder[]>([]);
+  const [settling, setSettling] = useState(false);
+  const [settlementError, setSettlementError] = useState<string | null>(null);
+  const [settlementNotice, setSettlementNotice] = useState<string | null>(null);
+  const [busyOrder, setBusyOrder] = useState<string | null>(null);
+  const [restored, setRestored] = useState(false);
   const resultRef = useRef<HTMLDivElement>(null);
   const autoStarted = useRef(false);
+  const returnHandled = useRef(false);
   const autoRun = useMemo(() => new URLSearchParams(window.location.search).get('auto') === '1', []);
 
   useEffect(() => {
@@ -109,6 +141,7 @@ export default function App() {
         if (cancelled) return;
         setLiveAvailable(Boolean(h.liveQloo));
         setDataSource(h.liveQloo ? 'live' : 'demo');
+        setPaypal(h.paypal || null);
       })
       .catch(() => {
         if (!cancelled) setLiveAvailable(false);
@@ -117,6 +150,86 @@ export default function App() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(STORE_KEY);
+      if (raw) {
+        const saved = JSON.parse(raw);
+        if (saved.result?.plan) setResult(saved.result);
+        if (saved.draft) setSettlement(saved.draft);
+        if (saved.signature) setSettlementSignature(saved.signature);
+        if (saved.orders) setOrders(saved.orders);
+        if (Array.isArray(saved.ledger)) setLedger(saved.ledger);
+        if (Number.isFinite(saved.depositPct)) setDepositPct(saved.depositPct);
+        if (Number.isFinite(saved.capPct)) setCapPct(saved.capPct);
+        if (Array.isArray(saved.seeds) && saved.seeds.length) setSeeds(saved.seeds);
+        if (Number.isFinite(saved.budgetLakh)) setBudgetLakh(saved.budgetLakh);
+        if (Number.isFinite(saved.maxPerTag)) setMaxPerTag(saved.maxPerTag);
+      }
+    } catch {
+      /* local restore is a convenience, never the source of truth */
+    }
+    setRestored(true);
+  }, []);
+
+  useEffect(() => {
+    if (!restored) return;
+    try {
+      localStorage.setItem(
+        STORE_KEY,
+        JSON.stringify({
+          result,
+          draft: settlement,
+          signature: settlementSignature,
+          orders,
+          ledger,
+          depositPct,
+          capPct,
+          seeds,
+          budgetLakh,
+          maxPerTag,
+        }),
+      );
+    } catch {
+      /* ignore quota errors */
+    }
+  }, [
+    restored,
+    result,
+    settlement,
+    settlementSignature,
+    orders,
+    ledger,
+    depositPct,
+    capPct,
+    seeds,
+    budgetLakh,
+    maxPerTag,
+  ]);
+
+  useEffect(() => {
+    if (!restored || returnHandled.current) return;
+    const params = new URLSearchParams(window.location.search);
+    const state = params.get('settlement');
+    if (!state) return;
+    returnHandled.current = true;
+    const token = params.get('token');
+    const obligationId = params.get('obligation') || undefined;
+    window.history.replaceState({}, '', window.location.pathname);
+    window.setTimeout(() => {
+      document.getElementById('settlement')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 200);
+    if (state === 'cancel') {
+      setSettlementNotice('PayPal approval was cancelled. The order stays open in the ledger.');
+      return;
+    }
+    if (token) {
+      setSettlementNotice('Back from PayPal — capturing the approved deposit…');
+      captureOrder(token, obligationId, true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [restored]);
 
   useEffect(() => {
     if (!result) {
@@ -162,6 +275,18 @@ export default function App() {
     const fresh = result.diff.changes.filter((c) => c.status === 'new').length;
     return { kept, changed, fresh, dropped: result.diff.dropped.length };
   }, [result]);
+
+  const planSignature = signatureOf(plan);
+  const settlementStale = Boolean(
+    settlement && settlementSignature && settlementSignature !== planSignature,
+  );
+  const fundedObligations = useMemo(
+    () => settlement?.obligations.filter((o) => o.funded) ?? [],
+    [settlement],
+  );
+  const orderedFunded = fundedObligations.filter((o) => orders[o.id]).length;
+  const remainingFunded = fundedObligations.filter((o) => !orders[o.id]);
+  const capInr = Math.round(((plan?.totals.budgetInr ?? 0) * capPct) / 100);
 
   async function callPlan(body: Record<string, unknown>, isReplan = false) {
     if (isReplan) setReplanning(true);
@@ -256,6 +381,196 @@ export default function App() {
     );
   }
 
+  async function draftSettlementRun() {
+    if (!plan) return;
+    setSettling(true);
+    setSettlementError(null);
+    setSettlementNotice(null);
+    try {
+      const res = await fetch(`${API_BASE}/settlement/draft`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ plan, depositPct, capInr }),
+      });
+      const data = (await res.json()) as SettlementDraft & { error?: string };
+      if (!res.ok) throw new Error(data.error || 'Could not draft the settlement.');
+      setSettlement(data);
+      setSettlementSignature(planSignature);
+      setOrders({});
+      window.setTimeout(() => {
+        document.getElementById('settlement')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 80);
+    } catch (err) {
+      setSettlementError(err instanceof Error ? err.message : 'Could not draft the settlement.');
+    } finally {
+      setSettling(false);
+    }
+  }
+
+  async function fundObligations(selected: Obligation[], autoCapture = false) {
+    if (!settlement || selected.length === 0) return;
+    setSettling(true);
+    setSettlementError(null);
+    setSettlementNotice(null);
+    try {
+      const res = await fetch(`${API_BASE}/settlement/orders`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          runId: settlement.runId,
+          obligations: selected.map((o) => ({
+            id: o.id,
+            payee: o.payee,
+            amountUsd: o.depositUsd,
+            description: `FestOS ${o.label}: ${o.payee} deposit (${settlement.policy.depositPct}%)`,
+          })),
+        }),
+      });
+      const data = (await res.json()) as {
+        mode: string;
+        orders: SettlementOrder[];
+        errors?: { payee: string; error: string }[];
+        error?: string;
+      };
+      if (!res.ok) throw new Error(data.error || 'Could not create PayPal orders.');
+      const created = data.orders || [];
+      if (created.length === 0) {
+        throw new Error(data.errors?.[0]?.error || 'PayPal did not return an order.');
+      }
+      setOrders((prev) => {
+        const next = { ...prev };
+        for (const order of created) next[order.obligationId] = order;
+        return next;
+      });
+      setLedger((prev) => [
+        ...prev,
+        ...created.filter((order) => !prev.some((row) => row.orderId === order.orderId)),
+      ]);
+      if (data.errors?.length) {
+        setSettlementError(data.errors.map((e) => `${e.payee}: ${e.error}`).join(' · '));
+      }
+      if (data.mode === 'simulator') {
+        if (autoCapture) {
+          for (const order of created) {
+            await captureOrder(order.orderId, order.obligationId, true);
+          }
+          setSettlementNotice(
+            `Simulated settlement complete — ${created.length} deposit${
+              created.length === 1 ? '' : 's'
+            } marked paid. No money moved.`,
+          );
+        }
+      } else {
+        const first = created.find((order) => order.approveUrl);
+        if (first?.approveUrl) {
+          setSettlementNotice(
+            'Order created. Approve it in the PayPal sandbox, then you will land back here.',
+          );
+          window.location.assign(first.approveUrl);
+        }
+      }
+    } catch (err) {
+      setSettlementError(err instanceof Error ? err.message : 'Could not create PayPal orders.');
+    } finally {
+      setSettling(false);
+    }
+  }
+
+  function fundOne(obligation: Obligation) {
+    void fundObligations([obligation]);
+  }
+
+  function approveOrder(order: SettlementOrder) {
+    if (order.approveUrl) {
+      window.location.assign(order.approveUrl);
+      return;
+    }
+    void captureOrder(order.orderId, order.obligationId);
+  }
+
+  async function captureOrder(orderId: string, obligationId?: string, silent = false) {
+    setBusyOrder(orderId);
+    if (!silent) setSettlementError(null);
+    try {
+      const res = await fetch(`${API_BASE}/settlement/capture`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ orderId }),
+      });
+      const data = (await res.json()) as {
+        error?: string;
+        status?: string;
+        captureId?: string | null;
+        captureStatus?: string | null;
+        capturedAt?: string;
+        payerName?: string | null;
+        amountUsd?: number | null;
+        mode?: string;
+      };
+      if (!res.ok) throw new Error(data.error || 'PayPal could not capture this order.');
+      const patch = (order: SettlementOrder): SettlementOrder => ({
+        ...order,
+        status: data.status || order.status,
+        captureId: data.captureId ?? order.captureId,
+        captureStatus: data.captureStatus ?? order.captureStatus,
+        capturedAt: data.capturedAt || new Date().toISOString(),
+        payerName: data.payerName ?? order.payerName,
+        simulated: data.mode === 'simulator' || order.mode === 'simulator',
+      });
+      setOrders((prev) => {
+        const key = obligationId || Object.keys(prev).find((id) => prev[id].orderId === orderId);
+        if (!key || !prev[key]) return prev;
+        return { ...prev, [key]: patch(prev[key]) };
+      });
+      setLedger((prev) => prev.map((row) => (row.orderId === orderId ? patch(row) : row)));
+      if (!silent || data.mode === 'simulator') {
+        setSettlementNotice(
+          data.mode === 'simulator'
+            ? 'Simulated capture recorded — no money moved.'
+            : `PayPal captured ${data.amountUsd ? usd(data.amountUsd) : 'the deposit'}.`,
+        );
+      }
+    } catch (err) {
+      setSettlementError(err instanceof Error ? err.message : 'Capture failed.');
+    } finally {
+      setBusyOrder(null);
+    }
+  }
+
+  async function copyBrief() {
+    if (!settlement || !plan) return;
+    const lines = [
+      '# FestOS settlement brief',
+      '',
+      `Plan: ${plan.headline}`,
+      `Policy: ${settlement.policy.depositPct}% upfront · cap ${inr(
+        settlement.policy.capInr,
+      )} · ₹${settlement.policy.fxInrPerUsd.toFixed(2)} per $1`,
+      '',
+      settlement.brief,
+      '',
+      '| Slot | Payee | Deposit (USD) | Deposit (INR) | Decision | PayPal order |',
+      '| --- | --- | --- | --- | --- | --- |',
+      ...settlement.obligations.map(
+        (o) =>
+          `| ${o.label} | ${o.payee} | ${usd(o.depositUsd)} | ${inr(o.depositInr)} | ${o.decision} | ${
+            orders[o.id]?.orderId || '—'
+          } |`,
+      ),
+      '',
+      `Funded: ${usd(settlement.totals.fundedUsd)} (${inr(
+        settlement.totals.fundedInr,
+      )}). Holdback: ${inr(settlement.totals.holdbackInr)}.`,
+      settlement.policy.rule,
+    ];
+    try {
+      await navigator.clipboard.writeText(lines.join('\n'));
+      setSettlementNotice('Settlement brief copied to the clipboard.');
+    } catch {
+      setSettlementError('The browser blocked clipboard access.');
+    }
+  }
+
   return (
     <div className="app">
       <div className="grain" aria-hidden="true" />
@@ -284,7 +599,7 @@ export default function App() {
       <main>
         <section className="hero">
           <div className="hero-copy">
-            <p className="eyebrow">Qloo Agentic Hackathon · 2026</p>
+            <p className="eyebrow">Agentic commerce · 2026</p>
             <h1>
               Your campus has taste.
               <br />
@@ -293,11 +608,13 @@ export default function App() {
             <p className="lede">
               FestOS is a planning agent for student fests. Give it a few things your campus actually loves —
               it resolves them on the Qloo taste graph, finds culturally-aligned acts, then solves the budget,
-              genre mix and vendor spread into one run of show.
+              genre mix and vendor spread into one run of show. A second agent turns that plan into vendor
+              deposits and settles them through PayPal.
             </p>
             <div className="hero-notes">
               <span>Qloo Insights API</span>
               <span>Constraint solver</span>
+              <span>PayPal settlement</span>
               <span>Live re-planning</span>
             </div>
           </div>
@@ -519,6 +836,9 @@ export default function App() {
                     </p>
                   </div>
                   <div className="headline-actions">
+                    <a className="sim sim--pay" href="#settlement">
+                      <span aria-hidden="true">$</span> PayPal settlement
+                    </a>
                     <button className="sim" onClick={() => replan('drop')} disabled={replanning}>
                       <KindIcon kind="artist" size={15} /> Headliner drops out
                     </button>
@@ -684,6 +1004,303 @@ export default function App() {
                   </details>
                 </section>
 
+                <section className="settle" id="settlement" aria-label="PayPal settlement">
+                  <div className="panel-head">
+                    <h2>Settlement</h2>
+                    <span className="mono">03</span>
+                  </div>
+
+                  <div className="settle-grid">
+                    <div className="settle-copy">
+                      <p className="eyebrow">AGENTIC COMMERCE · PAYPAL SANDBOX</p>
+                      <h3>The lineup is planned. Now lock the dates.</h3>
+                      <p>
+                        FestOS turns {plan.lineup.length} booked slots into vendor deposits, funds the
+                        critical path first, and keeps an auditable PayPal ledger. The holdback stays with
+                        the committee until delivery.
+                      </p>
+                      <div className={`settle-mode settle-mode--${paypal?.mode || 'checking'}`}>
+                        <span className={`badge badge--${paypal?.mode === 'sandbox' ? 'live' : 'demo'}`}>
+                          {paypal
+                            ? paypal.mode === 'sandbox'
+                              ? 'PAYPAL SANDBOX'
+                              : 'SIMULATOR'
+                            : 'CHECKING PAYPAL'}
+                        </span>
+                        <span>{paypal?.note || 'Checking PayPal configuration…'}</span>
+                      </div>
+                    </div>
+
+                    <div className="settle-controls">
+                      <span className="field-label">
+                        Deposit <span>{depositPct}%</span>
+                      </span>
+                      <div className="segmented" role="group" aria-label="Deposit percentage">
+                        {[20, 30, 50].map((pct) => (
+                          <button
+                            key={pct}
+                            type="button"
+                            className={depositPct === pct ? 'active' : ''}
+                            aria-pressed={depositPct === pct}
+                            onClick={() => setDepositPct(pct)}
+                          >
+                            {pct}%
+                          </button>
+                        ))}
+                      </div>
+                      <p className="hint hint--small">
+                        {100 - depositPct}% holdback releases on delivery.
+                      </p>
+
+                      <div className="settle-cap">
+                        <label className="field-label" htmlFor="settle-cap">
+                          Deposit cap <span>{inr(capInr)}</span>
+                        </label>
+                        <input
+                          id="settle-cap"
+                          type="range"
+                          min={5}
+                          max={100}
+                          step={5}
+                          value={capPct}
+                          onChange={(e) => setCapPct(Number(e.target.value))}
+                        />
+                        <div className="range-ends mono">
+                          <span>5%</span>
+                          <span>{capPct}% of budget</span>
+                        </div>
+                      </div>
+
+                      {settlement ? (
+                        <>
+                          {remainingFunded.length > 0 ? (
+                            <button
+                              className="primary-cta"
+                              onClick={() => fundObligations(remainingFunded, true)}
+                              disabled={settling || settlementStale}
+                            >
+                              {settling ? <span className="spinner" aria-hidden="true" /> : null}
+                              {paypal?.mode === 'sandbox'
+                                ? `Create ${remainingFunded.length} PayPal order${
+                                    remainingFunded.length === 1 ? '' : 's'
+                                  }`
+                                : `Settle ${remainingFunded.length} funded slot${
+                                    remainingFunded.length === 1 ? '' : 's'
+                                  }`}
+                              {!settling ? <Arrow /> : null}
+                            </button>
+                          ) : fundedObligations.length > 0 ? (
+                            <div className="settle-complete">
+                              <StatusGlyph status="ok" />
+                              <div>
+                                <strong>Settlement complete</strong>
+                                <span>
+                                  {orderedFunded} of {fundedObligations.length} funded slots have
+                                  PayPal orders.
+                                </span>
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="settle-complete settle-complete--empty">
+                              <StatusGlyph status="warn" />
+                              <div>
+                                <strong>Nothing fits this cap</strong>
+                                <span>Raise the deposit cap or lower the deposit percentage.</span>
+                              </div>
+                            </div>
+                          )}
+                          <button
+                            className="ghost-btn ghost-btn--wide"
+                            onClick={draftSettlementRun}
+                            disabled={settling}
+                          >
+                            Re-draft with {depositPct}% deposit
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          className="primary-cta"
+                          onClick={draftSettlementRun}
+                          disabled={settling}
+                        >
+                          {settling ? <span className="spinner" aria-hidden="true" /> : null}
+                          Draft settlement
+                          {!settling ? <Arrow /> : null}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {settlementStale && (
+                    <div className="notice notice--warn">
+                      The lineup changed since this settlement was drafted. Re-draft it before creating
+                      more orders.
+                    </div>
+                  )}
+                  {settlementError && <p className="error-banner">{settlementError}</p>}
+                  {settlementNotice && <div className="notice">{settlementNotice}</div>}
+
+                  {settlement && (
+                    <>
+                      <div className="settle-totals">
+                        <div>
+                          <span className="mono">DEPOSITS</span>
+                          <strong>{usd(settlement.totals.fundedUsd)}</strong>
+                          <small>
+                            {inr(settlement.totals.fundedInr)} · {settlement.totals.fundedCount}/
+                            {settlement.totals.payableCount} slots
+                          </small>
+                        </div>
+                        <div>
+                          <span className="mono">HOLDBACK</span>
+                          <strong>{inr(settlement.totals.holdbackInr)}</strong>
+                          <small>{100 - settlement.policy.depositPct}% on delivery</small>
+                        </div>
+                        <div>
+                          <span className="mono">CAP LEFT</span>
+                          <strong>{inr(settlement.totals.headroomInr)}</strong>
+                          <small>of {inr(settlement.policy.capInr)}</small>
+                        </div>
+                        <div>
+                          <span className="mono">FX</span>
+                          <strong>₹{settlement.policy.fxInrPerUsd.toFixed(2)}</strong>
+                          <small>per $1 · fixed demo rate</small>
+                        </div>
+                      </div>
+
+                      <p className="settle-brief">{settlement.brief}</p>
+                      <p className="settle-rule mono">{settlement.policy.rule}</p>
+
+                      <div className="obligations">
+                        {settlement.obligations.map((o) => {
+                          const order = orders[o.id];
+                          const captured = Boolean(order?.captureId);
+                          return (
+                            <article key={o.id} className={`obligation obligation--${o.decision}`}>
+                              <div className="obl-main">
+                                <div className="obl-title">
+                                  <span className={`tier tier--${o.tier}`}>{o.tier}</span>
+                                  <strong>{o.label}</strong>
+                                  <span className="obl-payee">{o.payee}</span>
+                                </div>
+                                <div className="obl-money">
+                                  <strong>{usd(o.depositUsd)}</strong>
+                                  <span>
+                                    {inr(o.depositInr)} · holdback {inr(o.holdbackInr)}
+                                  </span>
+                                </div>
+                                <div className="obl-due mono">T-{o.dueInDays}d</div>
+                                <div className="obl-status">
+                                  {captured ? (
+                                    <span className="pill pill--ok">
+                                      {order?.simulated ? 'SIMULATED' : 'CAPTURED'}
+                                    </span>
+                                  ) : order ? (
+                                    <span className="pill pill--wait">ORDER CREATED</span>
+                                  ) : o.decision === 'funded' ? (
+                                    <span className="pill pill--ready">READY</span>
+                                  ) : o.decision === 'deferred' ? (
+                                    <span className="pill pill--defer">DEFERRED</span>
+                                  ) : (
+                                    <span className="pill">NO DEPOSIT</span>
+                                  )}
+                                </div>
+                                <div className="obl-action">
+                                  {captured ? (
+                                    <span className="mono obl-capture">
+                                      {order?.captureId?.slice(0, 14)}…
+                                    </span>
+                                  ) : order ? (
+                                    <button
+                                      className="pay-btn"
+                                      onClick={() => approveOrder(order)}
+                                      disabled={busyOrder === order.orderId}
+                                    >
+                                      {busyOrder === order.orderId
+                                        ? 'Capturing…'
+                                        : order.approveUrl
+                                          ? 'Approve on PayPal'
+                                          : 'Approve in simulator'}
+                                      <Arrow size={13} />
+                                    </button>
+                                  ) : o.decision === 'funded' ? (
+                                    <button
+                                      className="pay-btn"
+                                      onClick={() => fundOne(o)}
+                                      disabled={settling || settlementStale}
+                                    >
+                                      Fund deposit
+                                    </button>
+                                  ) : null}
+                                </div>
+                              </div>
+                              <p className="obl-why">{o.funded ? o.rationale : o.reason}</p>
+                            </article>
+                          );
+                        })}
+                      </div>
+
+                      <div className="settle-actions">
+                        {remainingFunded.length > 0 && !settlementStale && (
+                          <button
+                            className="ghost-btn"
+                            onClick={() => fundObligations(remainingFunded, true)}
+                            disabled={settling}
+                          >
+                            Settle {remainingFunded.length} remaining
+                          </button>
+                        )}
+                        <button className="ghost-btn" onClick={copyBrief}>
+                          Copy settlement brief
+                        </button>
+                        <span className="hint hint--small">
+                          {orderedFunded} of {fundedObligations.length} funded slots have PayPal orders.
+                        </span>
+                      </div>
+
+                      {ledger.length > 0 && (
+                        <details className="ledger" open>
+                          <summary>
+                            <span>PayPal ledger</span>
+                            <span className="mono">{ledger.length} orders</span>
+                          </summary>
+                          <div className="ledger-table">
+                            {ledger.map((o) => (
+                              <div key={o.orderId} className="ledger-row">
+                                <span className="mono">{o.mode.toUpperCase()}</span>
+                                <span className="ledger-id">{o.orderId}</span>
+                                <span>{o.payee}</span>
+                                <span>{usd(o.amountUsd)}</span>
+                                <span
+                                  className={`pill ${o.captureId ? 'pill--ok' : 'pill--wait'}`}
+                                  title={o.captureId ? `Capture ${o.captureId}` : undefined}
+                                >
+                                  {o.captureId
+                                    ? o.simulated
+                                      ? 'SIMULATED'
+                                      : 'CAPTURED'
+                                    : o.status}
+                                </span>
+                                <span className="mono">
+                                  {fmtTime(o.capturedAt || o.createdAt)}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        </details>
+                      )}
+
+                      <p className="footnote">
+                        Sandbox only — no live-money code path. PayPal cannot settle INR, so deposits are
+                        converted at a fixed demo rate; the USD amount is what PayPal would charge.
+                        {paypal?.mode === 'simulator'
+                          ? ' No PayPal credentials on this host, so the order lifecycle is simulated locally and labelled as such.'
+                          : ''}
+                      </p>
+                    </>
+                  )}
+                </section>
+
                 {error && <p className="error-banner">{error}</p>}
                 {replanning && (
                   <div className="replan-overlay" role="status">
@@ -707,14 +1324,17 @@ export default function App() {
           <span className="brand-word brand-word--small">
             FEST<span>OS</span>
           </span>
-          <p>Built for the Qloo Agentic Hackathon 2026. Not affiliated with Qloo.</p>
+          <p>Built for the Qloo Agentic Hackathon 2026 and the PayPal AI Hackathon. Not affiliated with Qloo or PayPal.</p>
         </div>
         <div className="foot-links">
           <a href="https://github.com/abhinavshukla152005-beep/festos" target="_blank" rel="noreferrer">
             Source
           </a>
+          <a href="https://paypalaihackathon.devpost.com/" target="_blank" rel="noreferrer">
+            PayPal hackathon
+          </a>
           <a href="https://qloo.devpost.com/" target="_blank" rel="noreferrer">
-            Hackathon
+            Qloo hackathon
           </a>
           <a href="https://docs.qloo.com" target="_blank" rel="noreferrer">
             Qloo docs

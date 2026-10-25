@@ -90,3 +90,82 @@ export interface PlanResponse {
   replanned?: boolean;
   action?: string;
 }
+
+export type PayPalMode = 'sandbox' | 'simulator';
+
+export interface PayPalStatus {
+  configured: boolean;
+  mode: PayPalMode;
+  environment: 'sandbox';
+  currency: 'USD';
+  note: string;
+}
+
+export interface Obligation {
+  id: string;
+  slot: string;
+  label: string;
+  role: string;
+  kind: Kind;
+  payee: string;
+  stage: string | null;
+  feeInr: number;
+  feeUsd: number;
+  depositInr: number;
+  depositUsd: number;
+  holdbackInr: number;
+  tier: 'critical' | 'core' | 'flexible';
+  priority: number;
+  dueInDays: number;
+  rationale: string;
+  funded: boolean;
+  decision: 'funded' | 'deferred' | 'none';
+  reason: string | null;
+}
+
+export interface SettlementDraft {
+  planKey: string;
+  runId: string;
+  policy: {
+    depositPct: number;
+    capInr: number;
+    planBudgetInr: number;
+    fxInrPerUsd: number;
+    currency: 'USD';
+    rule: string;
+  };
+  obligations: Obligation[];
+  totals: {
+    feeInr: number;
+    depositInr: number;
+    fundedInr: number;
+    fundedUsd: number;
+    deferredInr: number;
+    holdbackInr: number;
+    capInr: number;
+    headroomInr: number;
+    slots: number;
+    fundedCount: number;
+    payableCount: number;
+  };
+  brief: string;
+  warnings: string[];
+}
+
+export interface SettlementOrder {
+  obligationId: string;
+  payee: string;
+  orderId: string;
+  status: string;
+  approveUrl: string | null;
+  amountUsd: number;
+  mode: PayPalMode;
+  createdAt: string;
+  captureId?: string | null;
+  captureStatus?: string | null;
+  capturedAt?: string;
+  payerName?: string | null;
+  simulated?: boolean;
+  error?: string;
+  issue?: string | null;
+}

@@ -1,10 +1,10 @@
 # FestOS
 
-**A taste-aware planning agent for campus fests, built on the Qloo cultural taste graph.**
+**A taste-aware planning agent for campus fests, with a PayPal settlement layer.**
 
-Give FestOS a handful of things your campus actually loves — an artist, a film, a place students hang out at — and it returns a complete run of show: headliner, support acts, a late-night screening, and a food row, all chosen to fit a real budget and a deliberate genre mix.
+Give FestOS a handful of things your campus actually loves — an artist, a film, a place students hang out at — and it returns a complete run of show: headliner, support acts, a late-night screening, and a food row, all chosen to fit a real budget and a deliberate genre mix. A second agent then turns that plan into vendor deposits and settles them through PayPal Orders v2.
 
-Built solo for the [Qloo Agentic Hackathon 2026](https://qloo.devpost.com/).
+Built solo for the [Qloo Agentic Hackathon 2026](https://qloo.devpost.com/) and the [PayPal AI Hackathon 2026](https://paypalaihackathon.devpost.com/).
 
 **Live app:** <https://festos-abhinav-shukla1.vercel.app/> · **Source:** <https://github.com/abhinavshukla152005-beep/festos>
 
@@ -55,11 +55,48 @@ For a brief of `Arijit Singh`, `Diljit Dosanjh`, `Interstellar`:
 
 No raw Qloo payloads are committed; the screenshot and the example above are redacted. Entity IDs, names and scores in the repository are synthetic demo data.
 
+## Settlement
+
+The planner decides what to book. The settlement agent decides what to pay, in what order, and why.
+
+1. **Draft.** Each booked slot becomes an obligation: gross fee, deposit at the chosen percentage, holdback, and a due date relative to the event.
+2. **Apply policy.** Slots are funded in strict priority order — headliner → venue → support → opener → food. If a deposit would break the cap, it is deferred and nothing below it is funded. Every decision carries its reason into the UI.
+3. **Create orders.** Each funded obligation becomes a PayPal Orders v2 order in the sandbox. The approval URL opens in the same tab; PayPal returns to `/?settlement=return&obligation=…`, and the server captures the approved order.
+4. **Keep a ledger.** The UI records order id, amount, status, capture id and timestamp. Re-drafting never deletes a captured order from the ledger.
+
+![FestOS settlement](docs/festos-settlement.png)
+
+*One simulated run: seven deposits funded inside a ₹45 L cap, each with its own PayPal order and capture id.*
+
+![FestOS settlement with a tight cap](docs/festos-settlement-cap.png)
+
+*The same run at a 15% deposit cap: the agent funds the headliner and the venue, then defers every slot below them instead of breaking the cap.*
+
+### PayPal API usage
+
+| Purpose | Request |
+| --- | --- |
+| OAuth client credentials | `POST /v1/oauth2/token` |
+| Create a vendor deposit order | `POST /v2/checkout/orders` (intent `CAPTURE`, USD) |
+| Capture an approved order | `POST /v2/checkout/orders/{id}/capture` |
+
+Notes:
+
+- **Sandbox only.** There is no live PayPal base URL in `server/paypal.js`. This demo cannot move real money.
+- **USD conversion.** PayPal does not settle INR. Deposits are converted at a fixed demo rate of ₹83.50 = $1.00, labelled in the UI.
+- **Simulator fallback.** If `PAYPAL_CLIENT_ID` and `PAYPAL_CLIENT_SECRET` are absent, the server runs the same create → approve → capture lifecycle locally and labels every order `SIMULATED`. Adding the two env vars switches the identical UI to real sandbox calls.
+- **No secrets in the browser.** OAuth and Orders v2 calls happen server-side; the client only receives order ids, statuses and approval URLs.
+- **Idempotency.** Create and capture requests carry a `PayPal-Request-Id` derived from the settlement run, obligation and amount, so a retry cannot create a second order.
+
+### The policy in one line
+
+Strict priority: headliner → venue → support → opener → food. Nothing below a deferral is funded.
+
 ## Run it
 
 ```bash
 npm install
-cp .env.example .env      # add QLOO_API_KEY=... to go live
+cp .env.example .env      # optional: QLOO_API_KEY, PAYPAL_CLIENT_ID, PAYPAL_CLIENT_SECRET
 npm run dev               # API on :8787, UI on :5173
 ```
 
@@ -69,6 +106,15 @@ Production build:
 npm run build
 npm start                 # serves the built UI and the API on :8787
 ```
+
+### Testing the PayPal path
+
+1. Create a sandbox app at [developer.paypal.com](https://developer.paypal.com/) → Apps & Credentials → Sandbox.
+2. Put `PAYPAL_CLIENT_ID` and `PAYPAL_CLIENT_SECRET` in `.env` (or in the Vercel project).
+3. Plan a fest, open **Settlement**, draft it, then press **Create PayPal orders**.
+4. Approve with a sandbox personal account. PayPal returns to the app, which captures the order server-side.
+
+Without credentials the same buttons run in the labelled simulator, so the full UI and ledger stay testable.
 
 ### Demo mode vs live mode
 
@@ -85,7 +131,7 @@ The data-source switch is in the left panel. Live mode is disabled until the ser
 
 The app is a single-page frontend plus three JSON endpoints. The API is exposed at both `/api/*` and `/functions/v1/app/*`, and routes on an `op` query parameter, so platform path rewrites cannot break it.
 
-- **Vercel**: import the repository, keep the detected Vite build (`npm run build`, output `dist`), and set `QLOO_API_KEY` as a project environment variable. `vercel.json` sends both API prefixes to `api/index.js` with a 60-second function budget.
+- **Vercel**: import the repository, keep the detected Vite build (`npm run build`, output `dist`), and set `QLOO_API_KEY` as a project environment variable. Add `PAYPAL_CLIENT_ID` and `PAYPAL_CLIENT_SECRET` to turn settlement from simulator into real sandbox calls; set `PUBLIC_BASE_URL` if the proxy host is not the browser-visible domain. `vercel.json` sends both API prefixes to `api/index.js` with a 60-second function budget.
 - **Qoder Sites**: `npm run deploy:function` builds the edge-function bundle, then publish `dist` as the web directory with `deploy/qoder/function` as the function directory. The function is Deno-native and reads the key from the site Secret `QLOO_API_KEY`.
 
 Without a key, both deployments start in labelled demo mode. The UI's source toggle disables Live until `/functions/v1/app/health?op=health` reports `liveQloo: true`.
@@ -114,12 +160,16 @@ Without a key, both deployments start in labelled demo mode. The UI's source tog
 - **The agent is deterministic.** It is a tool-using planner (resolve → read → solve → validate → re-plan), not an LLM wrapper. Every number in the trace is measured.
 - **Affinity is aggregate.** Qloo describes what audiences with similar taste tend to like. It is not a prediction about any individual student.
 - **No ticketing or contracting.** FestOS does not verify artist availability, hold inventory, or issue contracts.
+- **Settlement is a prototype, not a payment processor.** It creates real PayPal *sandbox* orders; no live-money code path exists. A committee would still sign the contract and approve each payment.
+- **The FX rate is fixed.** ₹83.50 = $1.00 is a demo constant, not a quote. PayPal cannot settle INR, so the USD amount is what a sandbox order would charge.
+- **Simulator mode is labelled.** When PayPal credentials are absent, every order is marked `SIMULATOR` / `SIMULATED` in the UI and ledger. Nothing pretends real money moved.
 - **City coverage varies.** When Qloo has no place results for the requested city, the place lookup retries without the location filter and reports `placeScope: broader`. Place results are also filtered to food and drink venues before they can enter the food row.
 
 ## Stack
 
 - Node 20+ / Express API (ESM)
 - React 19 + TypeScript + Vite
+- PayPal Orders v2 REST API (sandbox)
 - No database, no external auth, no client-side API keys
 
 ## Repository layout
@@ -129,6 +179,8 @@ server/
   agent.js      plan orchestration and trace
   qloo.js       Qloo client, normalisation, private cache, demo routing
   planner.js    constrained lineup search, validation, diffing
+  paypal.js     Orders v2 client: OAuth, create, capture (sandbox only)
+  settlement.js deposit policy, caps, simulation, ledger payloads
   demo.js       synthetic catalogue for demo mode
   app.js        Express routes + local static hosting
   index.js      Node listener
@@ -136,7 +188,7 @@ server/
 api/
   index.js      Vercel function entry
 src/
-  App.tsx       brief, results, trace, re-planning UI
+  App.tsx       brief, results, trace, re-planning, settlement UI
   styles.css    single stylesheet
 scripts/
   build-function.mjs  packages the edge function
