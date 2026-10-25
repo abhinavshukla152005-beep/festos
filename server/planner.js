@@ -39,7 +39,7 @@ export function feeFor(entity, kind) {
 }
 
 function primaryTag(entity) {
-  return entity.cuisine || (entity.tags && entity.tags[0]) || 'uncharted';
+  return entity.cuisine || entity.genre || (entity.tags && entity.tags[0]) || 'uncharted';
 }
 
 function combos(items, k) {

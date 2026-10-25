@@ -57,6 +57,14 @@ function classifyPlace(place) {
   return { cuisine: match ? match[0] : null, food: FOOD_WORDS.test(hay) };
 }
 
+const GENRE_WORDS = /indie|pop\b|rock|bollywood|filmi|playback|qawwali|sufi|classical|folk|fusion|jazz|blues|metal|punk|hip hop|rap\b|electronic|edm\b|house\b|techno|soul|r&b|ghazal|devotional|bhangra|acoustic|country|reggae|latin|soundtrack|ambient|orchestral|trap\b|afrobeats|lo-fi|disco|funk|gospel|opera|carnatic|hindustani|semiclassical/i;
+
+function withGenre(entity, kind) {
+  if (kind !== 'artist') return entity;
+  const genre = (entity.tags || []).find((tag) => GENRE_WORDS.test(tag));
+  return genre ? { ...entity, genre } : entity;
+}
+
 function foodPlaces(rows) {
   const tagged = rows.map((row) => {
     const { cuisine, food } = classifyPlace(row);
@@ -167,9 +175,14 @@ export async function buildPlan(input = {}) {
       try {
         const rows = await client.search(task.seed, [task.type]);
         const ranked = rows
-          .map((r) => ({ r, score: nameScore(task.seed, r.name) }))
+          .map((r) => {
+            const name = nameScore(task.seed, r.name);
+            const pop = Number.isFinite(r.popularity) ? r.popularity : 0.4;
+            return { r, name, score: name * (0.55 + 0.45 * pop) };
+          })
+          .filter((row) => row.name >= 0.48)
           .sort((a, b) => b.score - a.score);
-        return { ...task, best: ranked[0] && ranked[0].score >= 0.48 ? ranked[0] : null };
+        return { ...task, best: ranked[0] || null };
       } catch (err) {
         diagnostics.resolveErrors.push(`${task.kind} "${task.seed}": ${err.message}`);
         return { ...task, error: err.message, best: null };
@@ -241,7 +254,9 @@ export async function buildPlan(input = {}) {
 
     for (const { rows, kind, seedName, fellBack } of results) {
       if (fellBack) placeFallbackUsed = true;
-      rows.forEach((row, index) => mergeCandidate(candidateMaps[kind], row, seedName, index));
+      rows.forEach((row, index) =>
+        mergeCandidate(candidateMaps[kind], withGenre(row, kind), seedName, index),
+      );
     }
     const counts = {
       artists: candidateMaps.artist.size,
@@ -326,7 +341,7 @@ export async function buildPlan(input = {}) {
     detail: `${plan.lineup.length} slots · ${formatBudget(plan.totals.feeInr)} committed · ${formatBudget(
       plan.totals.remainingInr,
     )} held back`,
-    chips: plan.lineup.slice(0, 3).map((p) => p.name),
+    chips: plan.lineup.filter((p) => p.kind === 'artist').map((p) => p.name),
   }));
 
   trace.push({
