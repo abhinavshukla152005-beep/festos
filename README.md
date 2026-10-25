@@ -42,6 +42,17 @@ Notes:
 - Responses are cached in a private in-memory cache (5 min TTL) — permitted by the hackathon rules — and **no Qloo response data is committed to this repository**.
 - If `QLOO_API_KEY` is absent, the app runs in a permanently-labelled **demo mode** with a synthetic catalogue and synthetic affinity scores. The UI banner and the API `meta.mode` both say so.
 
+### Request → result, redacted
+
+For a brief of `Arijit Singh`, `Diljit Dosanjh`, `Interstellar`:
+
+1. `GET /search?query=Arijit%20Singh&types=urn:entity:artist` → the best name match is kept only above a 0.48 similarity floor; the Qloo entity ID is used, never the free-text name.
+2. `GET /v2/insights?filter.type=urn:entity:artist&signal.interests.entities=<artist_id>&take=12` → up to 12 affinity-ranked artists. The same call is made for `urn:entity:movie` and for `urn:entity:place` with `filter.address=Kanpur`.
+3. Every candidate is tagged with the seed(s) that surfaced it. A candidate is attributed to a seed only when its affinity for that seed is within 0.25 of its best score, which stops every row claiming every seed.
+4. The solver picks one combination. All numbers shown in the trace (call count, cache hits, solver time, candidate counts, affinity) are measured at runtime.
+
+No raw Qloo payloads are committed; the screenshot and the example above are redacted. Entity IDs, names and scores in the repository are synthetic demo data.
+
 ## Run it
 
 ```bash
@@ -68,12 +79,21 @@ npm start                 # serves the built UI and the API on :8787
 
 The data-source switch is in the left panel. Live mode is disabled until the server has a key.
 
+## Deploy
+
+The app is a single-page frontend plus three JSON endpoints. The API is exposed at both `/api/*` and `/functions/v1/app/*`, and routes on an `op` query parameter, so platform path rewrites cannot break it.
+
+- **Vercel**: import the repository, keep the detected Vite build (`npm run build`, output `dist`), and set `QLOO_API_KEY` as a project environment variable. `vercel.json` sends both API prefixes to `api/index.js` with a 60-second function budget.
+- **Qoder Sites**: `npm run deploy:function` builds the edge-function bundle, then publish `dist` as the web directory with `deploy/qoder/function` as the function directory. The function is Deno-native and reads the key from the site Secret `QLOO_API_KEY`.
+
+Without a key, both deployments start in labelled demo mode. The UI's source toggle disables Live until `/functions/v1/app/health?op=health` reports `liveQloo: true`.
+
 ## How the solver works
 
 `server/planner.js`
 
 - Candidate pools are trimmed to the top 14 artists, 6 films and 9 vendors by affinity.
-- Enumerates 3-artist combinations (respecting `maxPerTag` per primary genre), 1 film, and 3 vendors with distinct cuisines — up to ~180k combinations per run, typically in a few tens of milliseconds.
+- Enumerates 3-artist combinations (respecting `maxPerTag` per primary genre), 1 film, and 3 vendors with distinct cuisines — up to ~180k combinations per run, typically in 0.5–1.5 s in Node.
 - Scores each feasible lineup:
 
   ```
@@ -90,6 +110,9 @@ The data-source switch is in the left panel. Live mode is disabled until the ser
 - **Fees are modelled planning weights, not quotes.** Demo entries carry a synthetic fee. Live entries derive a fee from Qloo affinity and a deterministic jitter. The UI labels this everywhere.
 - **Demo affinities are synthetic.** The demo catalogue uses real-world names so the flow is legible, but no score or provenance claim in demo mode comes from Qloo.
 - **The agent is deterministic.** It is a tool-using planner (resolve → read → solve → validate → re-plan), not an LLM wrapper. Every number in the trace is measured.
+- **Affinity is aggregate.** Qloo describes what audiences with similar taste tend to like. It is not a prediction about any individual student.
+- **No ticketing or contracting.** FestOS does not verify artist availability, hold inventory, or issue contracts.
+- **City coverage varies.** When Qloo has no place results for the requested city, the place lookup retries without the address filter and reports `placeScope: broader`.
 
 ## Stack
 
@@ -105,10 +128,16 @@ server/
   qloo.js       Qloo client, normalisation, private cache, demo routing
   planner.js    constrained lineup search, validation, diffing
   demo.js       synthetic catalogue for demo mode
-  index.js      Express API + static hosting
+  app.js        Express routes + local static hosting
+  index.js      Node listener
+  index.ts      Deno edge handler used by Qoder Sites
+api/
+  index.js      Vercel function entry
 src/
   App.tsx       brief, results, trace, re-planning UI
   styles.css    single stylesheet
+scripts/
+  build-function.mjs  packages the edge function
 ```
 
 ## License
