@@ -1,8 +1,18 @@
-import 'dotenv/config';
 import { demoSearch, demoInsights } from './demo.js';
 
-const KEY = (process.env.QLOO_API_KEY || '').trim();
-const BASE = (process.env.QLOO_BASE_URL || 'https://hackathon.api.qloo.com').replace(/\/$/, '');
+function readEnv(name) {
+  const deno = globalThis.Deno;
+  if (deno?.env?.get) {
+    try {
+      const value = deno.env.get(name);
+      if (value != null) return value;
+    } catch {}
+  }
+  return globalThis.process?.env?.[name] ?? '';
+}
+
+const KEY = readEnv('QLOO_API_KEY').trim();
+const BASE = (readEnv('QLOO_BASE_URL') || 'https://hackathon.api.qloo.com').replace(/\/$/, '');
 const TIMEOUT_MS = 15000;
 
 export const liveModeAvailable = Boolean(KEY);

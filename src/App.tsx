@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import type { Pick, PlanResponse, TraceStep } from './types';
 
+const API_BASE = '/functions/v1/app';
+
 const inr = (amount: number) => {
   if (!Number.isFinite(amount)) return '—';
   if (amount >= 10000000) return `₹${(amount / 10000000).toFixed(2)} Cr`;
@@ -101,7 +103,7 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
-    fetch('/api/health')
+    fetch(`${API_BASE}/health?op=health`)
       .then((r) => r.json())
       .then((h) => {
         if (cancelled) return;
@@ -166,7 +168,8 @@ export default function App() {
     else setLoading(true);
     setError(null);
     try {
-      const res = await fetch(isReplan ? '/api/replan' : '/api/plan', {
+      const op = isReplan ? 'replan' : 'plan';
+      const res = await fetch(`${API_BASE}/${op}?op=${op}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
