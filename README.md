@@ -34,11 +34,11 @@ FestOS treats a lineup as a **cultural-fit problem under constraints**, not a wi
 | --- | --- |
 | Resolve a signal to an entity | `GET /search?query=…&types=urn:entity:artist` |
 | Affinity-ranked candidates | `GET /v2/insights?filter.type=urn:entity:artist&signal.interests.entities=…` |
-| Local place candidates | `GET /v2/insights?filter.type=urn:entity:place&filter.address=Kanpur&signal.interests.entities=…` |
+| Local place candidates | `GET /v2/insights?filter.type=urn:entity:place&filter.location.query=Kanpur&signal.interests.entities=…` |
 
 Notes:
 
-- Only documented parameters are sent. If a city has no Qloo place coverage, the place lookup retries once without the address filter and the trace says so (`placeScope: broader`).
+- Only documented parameters are sent. If a city has no Qloo place coverage, the place lookup retries once without the location filter and the trace says so (`placeScope: broader`).
 - Base URL is **`https://hackathon.api.qloo.com`**; the key travels in the `X-Api-Key` header.
 - All Qloo traffic happens **server-side**. The browser never sees the key.
 - Responses are cached in a private in-memory cache (5 min TTL) — permitted by the hackathon rules — and **no Qloo response data is committed to this repository**.
@@ -48,8 +48,8 @@ Notes:
 
 For a brief of `Arijit Singh`, `Diljit Dosanjh`, `Interstellar`:
 
-1. `GET /search?query=Arijit%20Singh&types=urn:entity:artist` → the best name match is kept only above a 0.48 similarity floor; the Qloo entity ID is used, never the free-text name.
-2. `GET /v2/insights?filter.type=urn:entity:artist&signal.interests.entities=<artist_id>&take=12` → up to 12 affinity-ranked artists. The same call is made for `urn:entity:movie` and for `urn:entity:place` with `filter.address=Kanpur`.
+1. `GET /search?query=Arijit%20Singh&types=urn:entity:artist` → the best name match is kept only above a 0.48 similarity floor, with Qloo popularity breaking ties across entity types; the Qloo entity ID is used, never the free-text name.
+2. `GET /v2/insights?filter.type=urn:entity:artist&signal.interests.entities=<artist_id>&take=12` → up to 12 affinity-ranked artists. The same call is made for `urn:entity:movie` and for `urn:entity:place` with `filter.location.query=Kanpur`. Transient `429`/`5xx` responses are retried with backoff.
 3. Every candidate is tagged with the seed(s) that surfaced it. A candidate is attributed to a seed only when its affinity for that seed is within 0.25 of its best score, which stops every row claiming every seed.
 4. The solver picks one combination. All numbers shown in the trace (call count, cache hits, solver time, candidate counts, affinity) are measured at runtime.
 
@@ -114,7 +114,7 @@ Without a key, both deployments start in labelled demo mode. The UI's source tog
 - **The agent is deterministic.** It is a tool-using planner (resolve → read → solve → validate → re-plan), not an LLM wrapper. Every number in the trace is measured.
 - **Affinity is aggregate.** Qloo describes what audiences with similar taste tend to like. It is not a prediction about any individual student.
 - **No ticketing or contracting.** FestOS does not verify artist availability, hold inventory, or issue contracts.
-- **City coverage varies.** When Qloo has no place results for the requested city, the place lookup retries without the address filter and reports `placeScope: broader`.
+- **City coverage varies.** When Qloo has no place results for the requested city, the place lookup retries without the location filter and reports `placeScope: broader`. Place results are also filtered to food and drink venues before they can enter the food row.
 
 ## Stack
 
