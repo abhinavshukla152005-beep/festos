@@ -6,6 +6,8 @@ Give FestOS a handful of things your campus actually loves — an artist, a film
 
 Built solo for the [Qloo Agentic Hackathon 2026](https://qloo.devpost.com/).
 
+**Live app:** <https://festos-abhinav-shukla1.vercel.app/> · **Source:** <https://github.com/abhinavshukla152005-beep/festos>
+
 ![FestOS desktop UI](docs/festos-desktop.png)
 
 *One run in demo mode: a Kanpur campus brief resolved into a headliner, support acts, a late-night film and a food row — with the full agent trace open.*
