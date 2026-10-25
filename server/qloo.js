@@ -13,7 +13,12 @@ function readEnv(name) {
 
 const KEY = readEnv('QLOO_API_KEY').trim();
 const BASE = (readEnv('QLOO_BASE_URL') || 'https://hackathon.api.qloo.com').replace(/\/$/, '');
-const TIMEOUT_MS = 15000;
+const TIMEOUT_MS = 9000;
+const RETRYABLE = new Set([429, 500, 502, 503, 504]);
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 export const liveModeAvailable = Boolean(KEY);
 
@@ -46,7 +51,8 @@ function normalizeTagList(raw) {
 
 function extractAffinity(entity) {
   const props = entity.properties || {};
-  for (const candidate of [entity.affinity, props.affinity, entity.score, props.score]) {
+  const query = entity.query || {};
+  for (const candidate of [entity.affinity, query.affinity, props.affinity, entity.score, props.score]) {
     const n = Number(candidate);
     if (Number.isFinite(n) && n >= 0 && n <= 1) return n;
   }
@@ -79,11 +85,16 @@ export function createClient({ forceDemo = false } = {}) {
         : 'QLOO_API_KEY is not configured — running on clearly-labelled demo data.'
       : null;
 
-  const stats = { calls: 0, failures: 0, cacheHits: 0, toolCalls: 0 };
+  const stats = { calls: 0, failures: 0, cacheHits: 0, toolCalls: 0, errors: [] };
   const cache = new Map();
   const CACHE_TTL_MS = 5 * 60 * 1000;
 
-  async function liveGet(path, params) {
+  function recordError(path, message) {
+    stats.errors.push(`${path}: ${message}`.slice(0, 220));
+    if (stats.errors.length > 6) stats.errors.shift();
+  }
+
+  async function liveGet(path, params, { deadlineAt } = {}) {
     const url = new URL(`${BASE}${path}`);
     for (const [key, value] of Object.entries(params)) {
       if (value == null || value === '') continue;
@@ -96,29 +107,58 @@ export function createClient({ forceDemo = false } = {}) {
       stats.cacheHits += 1;
       return { data: hit.data, ms: 0, url: cacheKey, cached: true };
     }
-    const started = Date.now();
-    stats.calls += 1;
-    const res = await fetch(url, {
-      headers: { 'X-Api-Key': KEY, Accept: 'application/json' },
-      signal: AbortSignal.timeout(TIMEOUT_MS),
-    });
-    const ms = Date.now() - started;
-    if (!res.ok) {
-      stats.failures += 1;
+    const attempts = 2;
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      const started = Date.now();
+      stats.calls += 1;
+      let res;
+      try {
+        res = await fetch(url, {
+          headers: { 'X-Api-Key': KEY, Accept: 'application/json' },
+          signal: AbortSignal.timeout(TIMEOUT_MS),
+        });
+      } catch (err) {
+        const canRetry = attempt < attempts && (!deadlineAt || Date.now() + 600 < deadlineAt);
+        if (canRetry) {
+          await sleep(450 * attempt);
+          continue;
+        }
+        stats.failures += 1;
+        const wrapped = new Error(`Qloo ${path} request failed: ${err.message}`);
+        wrapped.status = 0;
+        recordError(path, wrapped.message);
+        throw wrapped;
+      }
+      const ms = Date.now() - started;
+      if (res.ok) {
+        const data = await res.json();
+        cache.set(cacheKey, { data, at: Date.now() });
+        return { data, ms, url: cacheKey };
+      }
       let body = '';
       try {
         body = (await res.text()).slice(0, 300);
       } catch {
         /* ignore */
       }
+      const canRetry =
+        RETRYABLE.has(res.status) &&
+        attempt < attempts &&
+        (!deadlineAt || Date.now() + 800 < deadlineAt);
+      if (canRetry) {
+        const retryAfter = Number(res.headers.get('retry-after'));
+        const wait = Number.isFinite(retryAfter) && retryAfter > 0 ? Math.min(retryAfter * 1000, 1500) : 500 * attempt;
+        await sleep(wait);
+        continue;
+      }
+      stats.failures += 1;
       const err = new Error(`Qloo ${path} returned ${res.status}${body ? `: ${body}` : ''}`);
       err.status = res.status;
       err.ms = ms;
+      recordError(path, err.message);
       throw err;
     }
-    const data = await res.json();
-    cache.set(cacheKey, { data, at: Date.now() });
-    return { data, ms, url: cacheKey };
+    throw new Error(`Qloo ${path} exhausted retries`);
   }
 
   async function search(query, types) {
@@ -133,7 +173,7 @@ export function createClient({ forceDemo = false } = {}) {
     return rows.slice(0, 3).map((r) => normalizeEntity(r, kind));
   }
 
-  async function insights(filterType, seed, { take = 10, city, signalTag } = {}) {
+  async function insights(filterType, seed, { take = 10, city, signalTag, deadlineAt } = {}) {
     stats.toolCalls += 1;
     const kind = KINDS[filterType] || 'artist';
     if (mode === 'demo') {
@@ -142,11 +182,12 @@ export function createClient({ forceDemo = false } = {}) {
     const params = {
       'filter.type': filterType,
       take,
+      'feature.explainability': true,
     };
     if (seed?.entity_id) params['signal.interests.entities'] = [seed.entity_id];
     if (signalTag) params['signal.interests.tags'] = [signalTag];
-    if (city) params['filter.address'] = city;
-    const { data } = await liveGet('/v2/insights', params);
+    if (city) params['filter.location.query'] = city;
+    const { data } = await liveGet('/v2/insights', params, { deadlineAt });
     const rows = data.results?.entities || (Array.isArray(data.results) ? data.results : []);
     return rows.map((r) => normalizeEntity(r, kind));
   }

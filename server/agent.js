@@ -80,6 +80,16 @@ export async function buildPlan(input = {}) {
   }
 
   const client = createClient({ forceDemo });
+  const diagnostics = { insightErrors: [], resolveErrors: [] };
+  const baseMeta = () => ({
+    mode: client.mode,
+    note: client.note,
+    insightErrors: diagnostics.insightErrors.slice(0, 4),
+    resolveErrors: diagnostics.resolveErrors.slice(0, 4),
+    qlooErrors: client.stats.errors.slice(0, 4),
+    calls: client.stats.calls,
+    failures: client.stats.failures,
+  });
   const step = async (id, title, fn) => {
     const t0 = Date.now();
     try {
@@ -118,7 +128,7 @@ export async function buildPlan(input = {}) {
         tasks.push({ seed, type, kind });
       }
     }
-    const results = await mapLimit(tasks, 4, async (task) => {
+    const results = await mapLimit(tasks, 3, async (task) => {
       try {
         const rows = await client.search(task.seed, [task.type]);
         const ranked = rows
@@ -126,6 +136,7 @@ export async function buildPlan(input = {}) {
           .sort((a, b) => b.score - a.score);
         return { ...task, best: ranked[0] && ranked[0].score >= 0.48 ? ranked[0] : null };
       } catch (err) {
+        diagnostics.resolveErrors.push(`${task.kind} "${task.seed}": ${err.message}`);
         return { ...task, error: err.message, best: null };
       }
     });
@@ -146,8 +157,8 @@ export async function buildPlan(input = {}) {
       status: resolvedSeeds.length ? (unresolved.length ? 'warn' : 'ok') : 'error',
       detail: `${resolvedSeeds.length}/${seeds.length} signals resolved${
         unresolved.length ? ` · unresolved: ${unresolved.join(', ')}` : ''
-      }`,
-      chips: resolvedSeeds.map((s) => `${s.name} → ${s.entity.name}`),
+      }${diagnostics.resolveErrors.length ? ` · ${diagnostics.resolveErrors.length} search errors` : ''}`,
+      chips: resolvedSeeds.map((s) => `${s.name} → ${s.entity.name} (${s.kind})`),
     };
   });
 
@@ -155,7 +166,7 @@ export async function buildPlan(input = {}) {
     return {
       error: 'None of those signals resolved on Qloo. Try well-known artist, movie or place names.',
       trace,
-      meta: { mode: client.mode, note: client.note },
+      meta: baseMeta(),
     };
   }
 
@@ -170,21 +181,24 @@ export async function buildPlan(input = {}) {
         jobs.push({ seedEntity: entity, kind });
       }
     }
-    const results = await mapLimit(jobs, 4, async ({ seedEntity, kind }) => {
+    const deadlineAt = Date.now() + 38000;
+    const results = await mapLimit(jobs, 2, async ({ seedEntity, kind }) => {
       const type = `urn:entity:${kind}`;
       try {
         const take = kind === 'artist' ? 12 : kind === 'movie' ? 8 : 10;
         let rows = await client.insights(type, seedEntity, {
           take,
           city: kind === 'place' ? city : undefined,
+          deadlineAt,
         });
         let fellBack = false;
         if (kind === 'place' && city && rows.length === 0) {
-          rows = await client.insights(type, seedEntity, { take });
+          rows = await client.insights(type, seedEntity, { take, deadlineAt });
           fellBack = rows.length > 0;
         }
         return { rows, kind, seedName: seedEntity.name, fellBack };
       } catch (err) {
+        diagnostics.insightErrors.push(`${kind} from "${seedEntity.name}": ${err.message}`);
         return { rows: [], kind, seedName: seedEntity.name, error: err.message };
       }
     });
@@ -198,17 +212,21 @@ export async function buildPlan(input = {}) {
       movies: candidateMaps.movie.size,
       places: candidateMaps.place.size,
     };
+    const failed = diagnostics.insightErrors.length;
     const noRows = counts.artists + counts.movies + counts.places === 0;
     return {
       counts,
       status: noRows ? 'error' : 'ok',
       detail: noRows
-        ? 'Qloo returned no candidates for these signals.'
-        : `${counts.artists} artists · ${counts.movies} movies · ${counts.places} local experiences`,
+        ? diagnostics.insightErrors[0] || 'Qloo returned no candidates for these signals.'
+        : `${counts.artists} artists · ${counts.movies} movies · ${counts.places} local experiences${
+            failed ? ` · ${failed}/${jobs.length} insight calls failed` : ''
+          }${placeFallbackUsed ? ' · broader venue scope' : ''}`,
       chips: [
         `signals: ${resolved.resolvedSeeds.map((s) => s.entity.name).join(', ')}`,
         placeFallbackUsed ? `venues: broader affinity (no ${city} venues)` : `venues: ${city}`,
-      ],
+        failed ? `error: ${diagnostics.insightErrors[0]}` : null,
+      ].filter(Boolean),
     };
   });
 
@@ -240,7 +258,19 @@ export async function buildPlan(input = {}) {
     return {
       error: solved.detail || 'No feasible lineup found.',
       trace,
-      meta: { mode: client.mode, note: client.note },
+      meta: {
+        ...baseMeta(),
+        candidateCounts: {
+          artists: candidates.artists.length,
+          movies: candidates.movies.length,
+          places: candidates.places.length,
+        },
+        candidatesWithoutAffinity: [
+          ...candidates.artists,
+          ...candidates.movies,
+          ...candidates.places,
+        ].filter((c) => c.affinity == null).length,
+      },
     };
   }
 
@@ -279,8 +309,7 @@ export async function buildPlan(input = {}) {
     },
     trace,
     meta: {
-      mode: client.mode,
-      note: client.note,
+      ...baseMeta(),
       location: locationQuery,
       placeScope: placeFallbackUsed ? 'broader' : 'local',
       budgetInr,
@@ -288,13 +317,11 @@ export async function buildPlan(input = {}) {
       seeds: resolved.resolvedSeeds.map((s) => ({
         query: s.name,
         resolved: s.entity.name,
+        resolvedId: s.entity.entity_id,
         kind: s.kind,
       })),
       unresolved: resolved.unresolved,
-      calls: client.stats.calls,
-      toolCalls: client.stats.toolCalls,
       cacheHits: client.stats.cacheHits || 0,
-      failures: client.stats.failures,
       candidateCounts: {
         artists: candidates.artists.length,
         movies: candidates.movies.length,
