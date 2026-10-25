@@ -68,7 +68,10 @@ function withGenre(entity, kind) {
 function foodPlaces(rows) {
   const tagged = rows.map((row) => {
     const { cuisine, food } = classifyPlace(row);
-    return { row: cuisine ? { ...row, cuisine } : row, food };
+    const tags = cuisine
+      ? [cuisine, ...(row.tags || []).filter((tag) => tag !== cuisine)]
+      : row.tags;
+    return { row: cuisine ? { ...row, cuisine, tags } : row, food };
   });
   const edible = tagged.filter((t) => t.food);
   return (edible.length ? edible : tagged).map((t) => t.row);
@@ -131,6 +134,7 @@ export async function buildPlan(input = {}) {
     resolveErrors: diagnostics.resolveErrors.slice(0, 4),
     qlooErrors: client.stats.errors.slice(0, 4),
     calls: client.stats.calls,
+    toolCalls: client.stats.toolCalls,
     failures: client.stats.failures,
   });
   const step = async (id, title, fn) => {
