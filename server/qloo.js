@@ -118,17 +118,12 @@ export function createClient({ forceDemo = false } = {}) {
       const rows = await demoSearch(query, types);
       return rows.map((r) => ({ ...r, feeLakh: r.feeLakh ?? null }));
     }
-    const { data } = await liveGet('/search', {
-      query,
-      types,
-      take: 3,
-      sort_by: 'match',
-    });
+    const { data } = await liveGet('/search', { query, types });
     const rows = Array.isArray(data.results) ? data.results : data.results?.entities || [];
-    return rows.map((r) => normalizeEntity(r, kind));
+    return rows.slice(0, 3).map((r) => normalizeEntity(r, kind));
   }
 
-  async function insights(filterType, seed, { take = 10, locationQuery, signalTag } = {}) {
+  async function insights(filterType, seed, { take = 10, city, signalTag } = {}) {
     stats.toolCalls += 1;
     const kind = KINDS[filterType] || 'artist';
     if (mode === 'demo') {
@@ -137,26 +132,14 @@ export function createClient({ forceDemo = false } = {}) {
     const params = {
       'filter.type': filterType,
       take,
-      sort_by: 'affinity',
     };
     if (seed?.entity_id) params['signal.interests.entities'] = [seed.entity_id];
     if (signalTag) params['signal.interests.tags'] = [signalTag];
-    if (locationQuery) params['signal.location.query'] = locationQuery;
+    if (city) params['filter.address'] = city;
     const { data } = await liveGet('/v2/insights', params);
     const rows = data.results?.entities || (Array.isArray(data.results) ? data.results : []);
     return rows.map((r) => normalizeEntity(r, kind));
   }
 
-  async function searchTags(query, take = 8) {
-    stats.toolCalls += 1;
-    if (mode === 'demo') return [];
-    const { data } = await liveGet('/v2/tags', { 'filter.query': query, take });
-    const rows = Array.isArray(data.results) ? data.results : data.results?.tags || [];
-    return rows.map((t) => ({
-      id: t.tag_id || t.id,
-      name: tagLabel(t),
-    }));
-  }
-
-  return { mode, note, stats, search, insights, searchTags };
+  return { mode, note, stats, search, insights };
 }

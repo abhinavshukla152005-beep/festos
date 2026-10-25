@@ -32,10 +32,11 @@ FestOS treats a lineup as a **cultural-fit problem under constraints**, not a wi
 | --- | --- |
 | Resolve a signal to an entity | `GET /search?query=…&types=urn:entity:artist` |
 | Affinity-ranked candidates | `GET /v2/insights?filter.type=urn:entity:artist&signal.interests.entities=…` |
-| Local place candidates | `GET /v2/insights?filter.type=urn:entity:place&signal.location.query=Kanpur, India` |
+| Local place candidates | `GET /v2/insights?filter.type=urn:entity:place&filter.address=Kanpur&signal.interests.entities=…` |
 
 Notes:
 
+- Only documented parameters are sent. If a city has no Qloo place coverage, the place lookup retries once without the address filter and the trace says so (`placeScope: broader`).
 - Base URL is **`https://hackathon.api.qloo.com`**; the key travels in the `X-Api-Key` header.
 - All Qloo traffic happens **server-side**. The browser never sees the key.
 - Responses are cached in a private in-memory cache (5 min TTL) — permitted by the hackathon rules — and **no Qloo response data is committed to this repository**.

@@ -160,6 +160,8 @@ export async function buildPlan(input = {}) {
   }
 
   const candidateMaps = { artist: new Map(), movie: new Map(), place: new Map() };
+  const city = locationQuery.split(',')[0].trim();
+  let placeFallbackUsed = false;
 
   await step('taste', 'Pulling audience affinities', async () => {
     const jobs = [];
@@ -172,17 +174,23 @@ export async function buildPlan(input = {}) {
       const type = `urn:entity:${kind}`;
       try {
         const take = kind === 'artist' ? 12 : kind === 'movie' ? 8 : 10;
-        const rows = await client.insights(type, seedEntity, {
+        let rows = await client.insights(type, seedEntity, {
           take,
-          locationQuery: kind === 'place' ? locationQuery : undefined,
+          city: kind === 'place' ? city : undefined,
         });
-        return { rows, kind, seedName: seedEntity.name };
+        let fellBack = false;
+        if (kind === 'place' && city && rows.length === 0) {
+          rows = await client.insights(type, seedEntity, { take });
+          fellBack = rows.length > 0;
+        }
+        return { rows, kind, seedName: seedEntity.name, fellBack };
       } catch (err) {
         return { rows: [], kind, seedName: seedEntity.name, error: err.message };
       }
     });
 
-    for (const { rows, kind, seedName } of results) {
+    for (const { rows, kind, seedName, fellBack } of results) {
+      if (fellBack) placeFallbackUsed = true;
       rows.forEach((row, index) => mergeCandidate(candidateMaps[kind], row, seedName, index));
     }
     const counts = {
@@ -199,7 +207,7 @@ export async function buildPlan(input = {}) {
         : `${counts.artists} artists · ${counts.movies} movies · ${counts.places} local experiences`,
       chips: [
         `signals: ${resolved.resolvedSeeds.map((s) => s.entity.name).join(', ')}`,
-        `location: ${locationQuery}`,
+        placeFallbackUsed ? `venues: broader affinity (no ${city} venues)` : `venues: ${city}`,
       ],
     };
   });
@@ -274,6 +282,7 @@ export async function buildPlan(input = {}) {
       mode: client.mode,
       note: client.note,
       location: locationQuery,
+      placeScope: placeFallbackUsed ? 'broader' : 'local',
       budgetInr,
       maxPerTag,
       seeds: resolved.resolvedSeeds.map((s) => ({
